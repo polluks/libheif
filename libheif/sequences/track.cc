@@ -25,7 +25,7 @@
 #include "sequences/chunk.h"
 #include "sequences/track_visual.h"
 #include "sequences/track_metadata.h"
-#include "libheif/api_structs.h"
+#include "api_structs.h"
 #include <limits>
 
 
@@ -89,7 +89,7 @@ void SampleAuxInfoHelper::add_nonpresent_sample()
 }
 
 
-void SampleAuxInfoHelper::write_interleaved(const std::shared_ptr<class HeifFile>& file)
+void SampleAuxInfoHelper::write_interleaved(const std::shared_ptr<HeifFile>& file)
 {
   if (m_interleaved && !m_data.empty()) {
     uint64_t pos = file->append_mdat_data(m_data);
@@ -99,7 +99,7 @@ void SampleAuxInfoHelper::write_interleaved(const std::shared_ptr<class HeifFile
   }
 }
 
-void SampleAuxInfoHelper::write_all(const std::shared_ptr<class Box>& parent, const std::shared_ptr<class HeifFile>& file)
+void SampleAuxInfoHelper::write_all(const std::shared_ptr<Box>& parent, const std::shared_ptr<HeifFile>& file)
 {
   parent->append_child_box(m_saiz);
   parent->append_child_box(m_saio);
@@ -163,72 +163,121 @@ Result<std::vector<uint8_t>> SampleAuxInfoReader::get_sample_info(const HeifFile
 }
 
 
-std::shared_ptr<class HeifFile> Track::get_file() const
+std::shared_ptr<HeifFile> Track::get_file() const
 {
   return m_heif_context->get_heif_file();
 }
 
 
-Track::Track(HeifContext* ctx, const std::shared_ptr<Box_trak>& trak_box)
+Track::Track(HeifContext* ctx)
 {
   m_heif_context = ctx;
+}
 
+
+Error Track::load(const std::shared_ptr<Box_trak>& trak_box)
+{
   m_trak = trak_box;
 
   auto tkhd = trak_box->get_child_box<Box_tkhd>();
   if (!tkhd) {
-    return; // TODO: error or dummy error track ?
+    return {
+      heif_error_Invalid_input,
+      heif_suberror_Unspecified,
+      "Track has no 'tkhd' box."
+    };
   }
 
   m_id = tkhd->get_track_id();
 
+  auto edts = trak_box->get_child_box<Box_edts>();
+  if (edts) {
+    m_elst = edts->get_child_box<Box_elst>();
+  }
+
   auto mdia = trak_box->get_child_box<Box_mdia>();
   if (!mdia) {
-    return;
+    return {
+      heif_error_Invalid_input,
+      heif_suberror_Unspecified,
+      "Track has no 'mdia' box."
+    };
   }
 
   m_tref = trak_box->get_child_box<Box_tref>();
 
   auto hdlr = mdia->get_child_box<Box_hdlr>();
   if (!hdlr) {
-    return;
+    return {
+      heif_error_Invalid_input,
+      heif_suberror_Unspecified,
+      "Track has no 'hdlr' box."
+    };
   }
 
   m_handler_type = hdlr->get_handler_type();
 
   m_minf = mdia->get_child_box<Box_minf>();
   if (!m_minf) {
-    return;
+    return {
+      heif_error_Invalid_input,
+      heif_suberror_Unspecified,
+      "Track has no 'minf' box."
+    };
   }
 
   m_mdhd = mdia->get_child_box<Box_mdhd>();
   if (!m_mdhd) {
-    return;
+    return {
+      heif_error_Invalid_input,
+      heif_suberror_Unspecified,
+      "Track has no 'mdhd' box."
+    };
   }
 
   auto stbl = m_minf->get_child_box<Box_stbl>();
   if (!stbl) {
-    return;
+    return {
+      heif_error_Invalid_input,
+      heif_suberror_Unspecified,
+      "Track has no 'stbl' box."
+    };
   }
 
   m_stsd = stbl->get_child_box<Box_stsd>();
   if (!m_stsd) {
-    return;
+    return {
+      heif_error_Invalid_input,
+      heif_suberror_Unspecified,
+      "Track has no 'stsd' box."
+    };
   }
 
   m_stsc = stbl->get_child_box<Box_stsc>();
   if (!m_stsc) {
-    return;
+    return {
+      heif_error_Invalid_input,
+      heif_suberror_Unspecified,
+      "Track has no 'stsc' box."
+    };
   }
 
   m_stco = stbl->get_child_box<Box_stco>();
   if (!m_stco) {
-    return;
+    return {
+      heif_error_Invalid_input,
+      heif_suberror_Unspecified,
+      "Track has no 'stco' box."
+    };
   }
 
   m_stsz = stbl->get_child_box<Box_stsz>();
   if (!m_stsz) {
-    return;
+    return {
+      heif_error_Invalid_input,
+      heif_suberror_Unspecified,
+      "Track has no 'stsz' box."
+    };
   }
 
   m_stts = stbl->get_child_box<Box_stts>();
@@ -237,18 +286,31 @@ Track::Track(HeifContext* ctx, const std::shared_ptr<Box_trak>& trak_box)
   assert(chunk_offsets.size() <= (size_t) std::numeric_limits<uint32_t>::max()); // There cannot be more than uint32_t chunks.
 
   uint32_t current_sample_idx = 0;
+  int32_t previous_sample_description_index = -1;
 
   for (size_t chunk_idx = 0; chunk_idx < chunk_offsets.size(); chunk_idx++) {
     auto* s2c = m_stsc->get_chunk(static_cast<uint32_t>(chunk_idx + 1));
     if (!s2c) {
-      return;
+      return {
+        heif_error_Invalid_input,
+        heif_suberror_Unspecified,
+        "'stco' box references a non-existing chunk."
+      };
     }
 
     Box_stsc::SampleToChunk sampleToChunk = *s2c;
 
     auto sample_description = m_stsd->get_sample_entry(sampleToChunk.sample_description_index - 1);
     if (!sample_description) {
-      return;
+      return {
+        heif_error_Invalid_input,
+        heif_suberror_Unspecified,
+        "Track references a non-existing sample description."
+      };
+    }
+
+    if (auto auxi = sample_description->get_child_box<Box_auxi>()) {
+      m_auxiliary_info_type = auxi->get_aux_track_type_urn();
     }
 
     if (m_first_taic == nullptr) {
@@ -258,14 +320,26 @@ Track::Track(HeifContext* ctx, const std::shared_ptr<Box_trak>& trak_box)
       }
     }
 
-    auto chunk = std::make_shared<Chunk>(ctx, m_id, sample_description,
+    auto chunk = std::make_shared<Chunk>(m_heif_context, m_id,
                                          current_sample_idx, sampleToChunk.samples_per_chunk,
                                          m_stco->get_offsets()[chunk_idx],
                                          m_stsz);
 
+    if (auto visualSampleDescription = std::dynamic_pointer_cast<const Box_VisualSampleEntry>(sample_description)) {
+      if (chunk_idx > 0 && (int32_t) sampleToChunk.sample_description_index == previous_sample_description_index) {
+        // reuse decoder from previous chunk if it uses the sample sample_description_index
+        chunk->set_decoder(m_chunks[chunk_idx - 1]->get_decoder());
+      }
+      else {
+        // use a new decoder
+        chunk->set_decoder(Decoder::alloc_for_sequence_sample_description_box(visualSampleDescription));
+      }
+    }
+
     m_chunks.push_back(chunk);
 
     current_sample_idx += sampleToChunk.samples_per_chunk;
+    previous_sample_description_index = sampleToChunk.sample_description_index;
   }
 
   // --- read sample auxiliary information boxes
@@ -314,21 +388,25 @@ Track::Track(HeifContext* ctx, const std::shared_ptr<Box_trak>& trak_box)
           heif_item_id id = box->get_item_ID();
 
           std::vector<uint8_t> data;
-          Error err = iloc->read_data(id, ctx->get_heif_file()->get_reader(), idat, &data, ctx->get_security_limits());
+          Error err = iloc->read_data(id, m_heif_context->get_heif_file()->get_reader(), idat, &data, m_heif_context->get_security_limits());
           if (err) {
             // TODO
           }
 
           Result contentIdResult = vector_to_string(data);
-          if (contentIdResult.error) {
+          if (!contentIdResult) {
             // TODO
           }
 
-          m_track_info.gimi_track_content_id = contentIdResult.value;
+          m_track_info.gimi_track_content_id = *contentIdResult;
         }
       }
     }
   }
+
+  init_sample_timing_table();
+
+  return {};
 }
 
 
@@ -446,33 +524,91 @@ Track::Track(HeifContext* ctx, uint32_t track_id, const TrackOptions* options, u
 }
 
 
-std::shared_ptr<Track> Track::alloc_track(HeifContext* ctx, const std::shared_ptr<Box_trak>& trak)
+Result<std::shared_ptr<Track>> Track::alloc_track(HeifContext* ctx, const std::shared_ptr<Box_trak>& trak)
 {
   auto mdia = trak->get_child_box<Box_mdia>();
   if (!mdia) {
-    return nullptr;
+    return Error{
+      heif_error_Invalid_input,
+      heif_suberror_Unspecified,
+      "Track has no 'mdia' box."
+    };
   }
 
   auto hdlr = mdia->get_child_box<Box_hdlr>();
-  if (!mdia) {
-    return nullptr;
+  if (!hdlr) {
+    return Error{
+      heif_error_Invalid_input,
+      heif_suberror_Unspecified,
+      "Track has no 'hdlr' box."
+    };
   }
+
+  std::shared_ptr<Track> track;
 
   switch (hdlr->get_handler_type()) {
     case fourcc("pict"):
     case fourcc("vide"):
-      return std::make_shared<Track_Visual>(ctx, trak);
+    case fourcc("auxv"):
+      track = std::make_shared<Track_Visual>(ctx);
+      break;
     case fourcc("meta"):
-      return std::make_shared<Track_Metadata>(ctx, trak);
-    default:
-      return nullptr;
+      track = std::make_shared<Track_Metadata>(ctx);
+    default: {
+      std::stringstream sstr;
+      sstr << "Track with unsupported handler type '" << fourcc_to_string(hdlr->get_handler_type()) << "'.";
+      return Error{
+        heif_error_Unsupported_filetype,
+        heif_suberror_Unspecified,
+        sstr.str()
+      };
+    }
   }
+
+  assert(track);
+  Error loadError = track->load(trak);
+  if (loadError) {
+    return loadError;
+  }
+
+  return {track};
 }
 
 
 bool Track::is_visual_track() const
 {
-  return m_handler_type == fourcc("pict");
+  return (m_handler_type == fourcc("pict") ||
+          m_handler_type == fourcc("vide"));
+}
+
+
+static const char* cAuxType_alpha_miaf = "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha";
+static const char* cAuxType_alpha_hevc = "urn:mpeg:hevc:2015:auxid:1";
+static const char* cAuxType_alpha_avc = "urn:mpeg:avc:2015:auxid:1";
+
+heif_auxiliary_track_info_type Track::get_auxiliary_info_type() const
+{
+  if (m_auxiliary_info_type == cAuxType_alpha_miaf ||
+      m_auxiliary_info_type == cAuxType_alpha_hevc ||
+      m_auxiliary_info_type == cAuxType_alpha_avc) {
+    return heif_auxiliary_track_info_type_alpha;
+  }
+  else {
+    return heif_auxiliary_track_info_type_unknown;
+  }
+}
+
+
+void Track::set_auxiliary_info_type(heif_auxiliary_track_info_type type)
+{
+  switch (type) {
+    case heif_auxiliary_track_info_type_alpha:
+      m_auxiliary_info_type = cAuxType_alpha_miaf;
+      break;
+    default:
+      m_auxiliary_info_type.clear();
+      break;
+  }
 }
 
 
@@ -515,7 +651,8 @@ Result<std::string> Track::get_first_cluster_urim_uri() const
 
 bool Track::end_of_sequence_reached() const
 {
-  return (m_next_sample_to_be_processed > m_chunks.back()->last_sample_number());
+  //return (m_next_sample_to_be_processed > m_chunks.back()->last_sample_number());
+  return m_next_sample_to_be_processed >= m_num_output_samples;
 }
 
 
@@ -524,7 +661,7 @@ void Track::finalize_track()
   if (m_aux_helper_tai_timestamps) m_aux_helper_tai_timestamps->write_all(m_stbl, get_file());
   if (m_aux_helper_content_ids) m_aux_helper_content_ids->write_all(m_stbl, get_file());
 
-  uint64_t duration = m_stts->get_total_duration(false);
+  uint64_t duration = m_stts->get_total_duration(true);
   m_mdhd->set_duration(duration);
 }
 
@@ -544,6 +681,31 @@ uint32_t Track::get_timescale() const
 void Track::set_track_duration_in_movie_units(uint64_t total_duration)
 {
   m_tkhd->set_duration(total_duration);
+
+  if (m_elst) {
+    Box_elst::Entry entry;
+    entry.segment_duration = total_duration;
+
+    m_elst->add_entry(entry);
+  }
+}
+
+
+void Track::enable_edit_list_repeat_mode(bool enable)
+{
+  if (!m_elst) {
+    if (!enable) {
+      return;
+    }
+
+    auto edts = std::make_shared<Box_edts>();
+    m_trak->append_child_box(edts);
+
+    m_elst = std::make_shared<Box_elst>();
+    edts->append_child_box(m_elst);
+
+    m_elst->enable_repeat_mode(enable);
+  }
 }
 
 
@@ -662,73 +824,130 @@ void Track::add_reference_to_track(uint32_t referenceType, uint32_t to_track_id)
 }
 
 
-Result<heif_raw_sequence_sample*> Track::get_next_sample_raw_data()
+void Track::init_sample_timing_table()
 {
-  if (m_current_chunk > m_chunks.size()) {
+  m_num_samples = m_stsz->num_samples();
+
+  // --- build media timeline
+
+  std::vector<SampleTiming> media_timeline;
+
+  uint64_t current_decoding_time = 0;
+  uint32_t current_chunk = 0;
+
+  for (uint32_t i = 0; i<m_num_samples; i++) {
+    SampleTiming timing;
+    timing.sampleIdx = i;
+    timing.media_decoding_time = current_decoding_time;
+    timing.sample_duration_media_time = m_stts->get_sample_duration(i);
+    current_decoding_time += timing.sample_duration_media_time;
+
+    while (i > m_chunks[current_chunk]->last_sample_number()) {
+      current_chunk++;
+
+      if (current_chunk > m_chunks.size()) {
+        timing.chunkIdx = 0; // TODO: error
+      }
+    }
+
+    timing.chunkIdx = current_chunk;
+
+    media_timeline.push_back(timing);
+  }
+
+  // --- build presentation timeline from editlist
+
+  bool fallback = false;
+
+  if (m_heif_context->get_sequence_timescale() != get_timescale()) {
+    fallback = true;
+  }
+  else if (m_elst &&
+           m_elst->num_entries() == 1 &&
+           m_elst->get_entry(0).media_time == 0 &&
+           m_elst->get_entry(0).segment_duration == m_mdhd->get_duration() &&
+           m_elst->is_repeat_mode()) {
+    m_presentation_timeline = media_timeline;
+    m_num_output_samples = m_heif_context->get_sequence_duration() / get_duration_in_media_units() * media_timeline.size();
+  }
+  else {
+    fallback = true;
+  }
+
+  // Fallback: just play the media timeline
+  if (fallback) {
+    m_presentation_timeline = media_timeline;
+    m_num_output_samples = media_timeline.size();
+  }
+}
+
+
+Result<heif_raw_sequence_sample*> Track::get_next_sample_raw_data(const heif_decoding_options* options)
+{
+  uint64_t num_output_samples = m_num_output_samples;
+  if (options && options->ignore_sequence_editlist) {
+    num_output_samples = m_num_samples;
+  }
+
+  if (m_next_sample_to_be_processed >= num_output_samples) {
     return Error{heif_error_End_of_sequence,
                  heif_suberror_Unspecified,
                  "End of sequence"};
   }
 
-  while (m_next_sample_to_be_processed > m_chunks[m_current_chunk]->last_sample_number()) {
-    m_current_chunk++;
+  const auto& sampleTiming = m_presentation_timeline[m_next_sample_to_be_processed % m_presentation_timeline.size()];
+  uint32_t sample_idx = sampleTiming.sampleIdx;
+  uint32_t chunk_idx = sampleTiming.chunkIdx;
 
-    if (m_current_chunk > m_chunks.size()) {
-      return Error{heif_error_End_of_sequence,
-                   heif_suberror_Unspecified,
-                   "End of sequence"};
-    }
-  }
+  const std::shared_ptr<Chunk>& chunk = m_chunks[chunk_idx];
 
-  const std::shared_ptr<Chunk>& chunk = m_chunks[m_current_chunk];
-
-  DataExtent extent = chunk->get_data_extent_for_sample(m_next_sample_to_be_processed);
+  DataExtent extent = chunk->get_data_extent_for_sample(sample_idx);
   auto readResult = extent.read_data();
-  if (readResult.error) {
-    return readResult.error;
+  if (!readResult) {
+    return readResult.error();
   }
 
   heif_raw_sequence_sample* sample = new heif_raw_sequence_sample();
-  sample->data = *readResult.value;
+  sample->data = **readResult;
 
   // read sample duration
 
   if (m_stts) {
-    sample->duration = m_stts->get_sample_duration(m_next_sample_to_be_processed);
+    sample->duration = m_stts->get_sample_duration(sample_idx);
   }
 
   // --- read sample auxiliary data
 
   if (m_aux_reader_content_ids) {
-    auto readResult = m_aux_reader_content_ids->get_sample_info(get_file().get(), m_next_sample_to_be_processed);
-    if (readResult.error) {
-      return readResult.error;
+    auto readResult = m_aux_reader_content_ids->get_sample_info(get_file().get(), sample_idx);
+    if (!readResult) {
+      return readResult.error();
     }
 
-    if (!readResult.value.empty()) {
-      Result<std::string> convResult = vector_to_string(readResult.value);
-      if (convResult.error) {
-        return convResult.error;
+    if (!readResult->empty()) {
+      Result<std::string> convResult = vector_to_string(*readResult);
+      if (!convResult) {
+        return convResult.error();
       }
 
-      sample->gimi_sample_content_id = convResult.value;
+      sample->gimi_sample_content_id = *convResult;
     }
   }
 
   if (m_aux_reader_tai_timestamps) {
-    auto readResult = m_aux_reader_tai_timestamps->get_sample_info(get_file().get(), m_next_sample_to_be_processed);
-    if (readResult.error) {
-      return readResult.error;
+    auto readResult = m_aux_reader_tai_timestamps->get_sample_info(get_file().get(), sample_idx);
+    if (!readResult) {
+      return readResult.error();
     }
 
-    if (!readResult.value.empty()) {
-      auto resultTai = Box_itai::decode_tai_from_vector(readResult.value);
-      if (resultTai.error) {
-        return resultTai.error;
+    if (!readResult->empty()) {
+      auto resultTai = Box_itai::decode_tai_from_vector(*readResult);
+      if (!resultTai) {
+        return resultTai.error();
       }
 
       sample->timestamp = heif_tai_timestamp_packet_alloc();
-      heif_tai_timestamp_packet_copy(sample->timestamp, &resultTai.value);
+      heif_tai_timestamp_packet_copy(sample->timestamp, &*resultTai);
     }
   }
 

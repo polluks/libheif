@@ -24,7 +24,7 @@
 #include "error.h"
 #include "context.h"
 #include "plugin_registry.h"
-#include "libheif/api_structs.h"
+#include "api_structs.h"
 
 #include "codecs/hevc_dec.h"
 #include "codecs/avif_dec.h"
@@ -223,79 +223,94 @@ Result<std::vector<uint8_t>> Decoder::get_compressed_data() const
   // data from configuration blocks
 
   Result<std::vector<uint8_t>> confData = read_bitstream_configuration_data();
-  if (confData.error) {
-    return confData.error;
+  if (!confData) {
+    return confData.error();
   }
 
-  std::vector<uint8_t> data = confData.value;
+  std::vector<uint8_t> data = *confData;
 
   // append image data
 
-  Result dataResult = m_data_extent.read_data();
-  if (dataResult.error) {
-    return dataResult.error;
+  auto dataResult = m_data_extent.read_data();
+  if (!dataResult) {
+    return dataResult.error();
   }
 
-  data.insert(data.end(), dataResult.value->begin(), dataResult.value->end());
+  data.insert(data.end(), (*dataResult)->begin(), (*dataResult)->end());
 
   return data;
 }
 
 
-Result<std::shared_ptr<HeifPixelImage>>
-Decoder::decode_single_frame_from_compressed_data(const struct heif_decoding_options& options,
-                                                  const struct heif_security_limits* limits)
+Decoder::~Decoder()
 {
-  const struct heif_decoder_plugin* decoder_plugin = get_decoder(get_compression_format(), options.decoder_id);
-  if (!decoder_plugin) {
-    return Error(heif_error_Plugin_loading_error, heif_suberror_No_matching_decoder_installed);
+  if (m_decoder) {
+    assert(m_decoder_plugin);
+    m_decoder_plugin->free_decoder(m_decoder);
   }
 
+  //std::unique_ptr<void, void (*)(void*)> decoderSmartPtr(m_decoder, m_decoder_plugin->free_decoder);
+}
+
+
+Result<std::shared_ptr<HeifPixelImage>>
+Decoder::decode_single_frame_from_compressed_data(const heif_decoding_options& options,
+                                                  const heif_security_limits* limits)
+{
+  if (!m_decoder_plugin) {
+    m_decoder_plugin = get_decoder(get_compression_format(), options.decoder_id);
+    if (!m_decoder_plugin) {
+      return Error(heif_error_Plugin_loading_error, heif_suberror_No_matching_decoder_installed);
+    }
+  }
 
   // --- decode image with the plugin
 
-  if (decoder_plugin->new_decoder == nullptr) {
-    return Error(heif_error_Plugin_loading_error, heif_suberror_No_matching_decoder_installed,
-                 "Cannot decode with a dummy decoder plugin.");
-  }
+  heif_error err;
 
-  void* decoder;
-  struct heif_error err = decoder_plugin->new_decoder(&decoder);
-  if (err.code != heif_error_Ok) {
-    return Error(err.code, err.subcode, err.message);
-  }
+  if (!m_decoder) {
+    if (m_decoder_plugin->new_decoder == nullptr) {
+      return Error(heif_error_Plugin_loading_error, heif_suberror_No_matching_decoder_installed,
+                   "Cannot decode with a dummy decoder plugin.");
+    }
 
-  // automatically delete decoder plugin when we leave the scope
-  std::unique_ptr<void, void (*)(void*)> decoderSmartPtr(decoder, decoder_plugin->free_decoder);
+    err = m_decoder_plugin->new_decoder(&m_decoder);
+    if (err.code != heif_error_Ok) {
+      return Error(err.code, err.subcode, err.message);
+    }
 
-  if (decoder_plugin->plugin_api_version >= 2) {
-    if (decoder_plugin->set_strict_decoding) {
-      decoder_plugin->set_strict_decoding(decoder, options.strict_decoding);
+    // automatically delete decoder plugin when we leave the scope
+    //std::unique_ptr<void, void (*)(void*)> decoderSmartPtr(m_decoder, m_decoder_plugin->free_decoder);
+
+    if (m_decoder_plugin->plugin_api_version >= 2) {
+      if (m_decoder_plugin->set_strict_decoding) {
+        m_decoder_plugin->set_strict_decoding(m_decoder, options.strict_decoding);
+      }
     }
   }
 
   auto dataResult = get_compressed_data();
-  if (dataResult.error) {
-    return dataResult.error;
+  if (!dataResult) {
+    return dataResult.error();
   }
 
-  err = decoder_plugin->push_data(decoder, dataResult.value.data(), dataResult.value.size());
+  err = m_decoder_plugin->push_data(m_decoder, dataResult->data(), dataResult->size());
   if (err.code != heif_error_Ok) {
     return Error(err.code, err.subcode, err.message);
   }
 
   heif_image* decoded_img = nullptr;
 
-  if (decoder_plugin->plugin_api_version >= 4 &&
-      decoder_plugin->decode_next_image != nullptr) {
+  if (m_decoder_plugin->plugin_api_version >= 4 &&
+      m_decoder_plugin->decode_next_image != nullptr) {
 
-    err = decoder_plugin->decode_next_image(decoder, &decoded_img, limits);
+    err = m_decoder_plugin->decode_next_image(m_decoder, &decoded_img, limits);
     if (err.code != heif_error_Ok) {
       return Error::from_heif_error(err);
     }
   }
   else {
-    err = decoder_plugin->decode_image(decoder, &decoded_img);
+    err = m_decoder_plugin->decode_image(m_decoder, &decoded_img);
     if (err.code != heif_error_Ok) {
       return Error::from_heif_error(err);
     }

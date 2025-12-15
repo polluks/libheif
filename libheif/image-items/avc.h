@@ -43,7 +43,9 @@ public:
 
   heif_compression_format get_compression_format() const override { return heif_compression_AVC; }
 
-  Error on_load_file() override;
+  Error initialize_decoder() override;
+
+  void set_decoder_input_data() override;
 
   heif_brand2 get_compatible_brand() const override { return heif_brand2_avci; }
 
@@ -52,9 +54,9 @@ protected:
 
 public:
   Result<Encoder::CodedImageData> encode(const std::shared_ptr<HeifPixelImage>& image,
-                                         struct heif_encoder* encoder,
-                                         const struct heif_encoding_options& options,
-                                         enum heif_image_input_class input_class) override;
+                                         heif_encoder* encoder,
+                                         const heif_encoding_options& options,
+                                         heif_image_input_class input_class) override;
 
   std::shared_ptr<class Decoder_AVC> m_decoder;
 };

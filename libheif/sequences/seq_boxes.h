@@ -116,7 +116,17 @@ public:
   Box_tkhd()
   {
     set_short_type(fourcc("tkhd"));
+
+    // set default flags according to ISO 14496-12
+    set_flags(Track_enabled | Track_in_movie | Track_in_preview);
   }
+
+  enum Flags {
+    Track_enabled = 0x01,
+    Track_in_movie = 0x02,
+    Track_in_preview = 0x04,
+    Track_size_is_aspect_ratio = 0x08
+  };
 
   std::string dump(Indent&) const override;
 
@@ -443,6 +453,8 @@ public:
 
   uint32_t get_fixed_sample_size() const { return m_fixed_sample_size; }
 
+  uint32_t num_samples() const { return m_sample_count; }
+
   const std::vector<uint32_t>& get_sample_sizes() const { return m_sample_sizes; }
 
   void append_sample_size(uint32_t size);
@@ -513,6 +525,31 @@ protected:
 
 private:
   CodingConstraints m_codingConstraints;
+};
+
+
+class Box_auxi : public FullBox {
+public:
+  Box_auxi()
+  {
+    set_short_type(fourcc("auxi"));
+  }
+
+  std::string dump(Indent&) const override;
+
+  const char* debug_box_name() const override { return "Auxiliary Info Type"; }
+
+  Error write(StreamWriter& writer) const override;
+
+  void set_aux_track_type_urn(const std::string& t) { m_aux_track_type = t; }
+
+  std::string get_aux_track_type_urn() const { return m_aux_track_type; }
+
+protected:
+  Error parse(BitstreamRange& range, const heif_security_limits*) override;
+
+private:
+  std::string m_aux_track_type;
 };
 
 
@@ -858,5 +895,59 @@ private:
   std::vector<Reference> m_references;
 };
 
+
+// Edit List container
+class Box_edts : public Box_container {
+public:
+  Box_edts() : Box_container("edts") {}
+
+  const char* debug_box_name() const override { return "Edit List Container"; }
+};
+
+
+class Box_elst : public FullBox
+{
+public:
+  Box_elst()
+  {
+    set_short_type(fourcc("elst"));
+  }
+
+  enum Flags {
+    Repeat_EditList = 0x01
+  };
+
+  std::string dump(Indent&) const override;
+
+  const char* debug_box_name() const override { return "Edit List"; }
+
+  void enable_repeat_mode(bool enable);
+
+  bool is_repeat_mode() const { return get_flags() & Flags::Repeat_EditList; }
+
+  struct Entry {
+    uint64_t segment_duration = 0;
+    int64_t media_time = 0;
+    int16_t media_rate_integer = 1;
+    int16_t media_rate_fraction = 0;
+  };
+
+  void add_entry(const Entry&);
+
+  size_t num_entries() const { return m_entries.size(); }
+
+  Entry get_entry(uint32_t entry) const { return m_entries[entry]; }
+
+protected:
+  Error parse(BitstreamRange& range, const heif_security_limits*) override;
+
+  Error write(StreamWriter& writer) const override;
+
+public:
+  void derive_box_version() override;
+
+private:
+  std::vector<Entry> m_entries;
+};
 
 #endif //SEQ_BOXES_H

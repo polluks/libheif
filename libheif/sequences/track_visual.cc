@@ -24,37 +24,93 @@
 #include "chunk.h"
 #include "pixelimage.h"
 #include "context.h"
-#include "libheif/api_structs.h"
+#include "api_structs.h"
 #include "codecs/hevc_boxes.h"
 
 
-Track_Visual::Track_Visual(HeifContext* ctx, const std::shared_ptr<Box_trak>& trak)
-    : Track(ctx, trak)
+Track_Visual::Track_Visual(HeifContext* ctx)
+    : Track(ctx)
 {
+}
+
+Error Track_Visual::load(const std::shared_ptr<Box_trak>& trak)
+{
+  Error parentLoadError = Track::load(trak);
+  if (parentLoadError) {
+    return parentLoadError;
+  }
+
   const std::vector<uint32_t>& chunk_offsets = m_stco->get_offsets();
 
   // Find sequence resolution
 
-  if (!chunk_offsets.empty())  {
+  if (!chunk_offsets.empty()) {
     auto* s2c = m_stsc->get_chunk(static_cast<uint32_t>(1));
     if (!s2c) {
-      return;
+      return {
+        heif_error_Invalid_input,
+        heif_suberror_Unspecified,
+        "Visual track has no chunk 1"
+      };
     }
 
     Box_stsc::SampleToChunk sampleToChunk = *s2c;
 
     auto sample_description = m_stsd->get_sample_entry(sampleToChunk.sample_description_index - 1);
     if (!sample_description) {
-      return; // TODO
+      return {
+        heif_error_Invalid_input,
+        heif_suberror_Unspecified,
+        "Visual track has sample description"
+      };
     }
 
     auto visual_sample_description = std::dynamic_pointer_cast<const Box_VisualSampleEntry>(sample_description);
     if (!visual_sample_description) {
-      return; // TODO
+      return {
+        heif_error_Invalid_input,
+        heif_suberror_Unspecified,
+        "Visual track sample description does not match visual track."
+      };
     }
 
     m_width = visual_sample_description->get_VisualSampleEntry_const().width;
     m_height = visual_sample_description->get_VisualSampleEntry_const().height;
+  }
+
+  return {};
+}
+
+
+void Track_Visual::initialize_after_parsing(HeifContext* ctx, const std::vector<std::shared_ptr<Track>>& all_tracks)
+{
+  // --- check whether there is an auxiliary alpha track assigned to this track
+
+  // Only assign to image-sequence tracks (TODO: are there also alpha tracks allowed for video tracks 'heif_track_type_video'?)
+
+  if (get_handler() == heif_track_type_image_sequence) {
+    for (auto track : all_tracks) {
+
+      // skip ourselves
+      if (track->get_id() != get_id()) {
+
+        // Is this an aux alpha track?
+        auto h = fourcc_to_string(track->get_handler());
+        if (track->get_handler() == heif_track_type_auxiliary &&
+            track->get_auxiliary_info_type() == heif_auxiliary_track_info_type_alpha) {
+
+          // Is it assigned to the current track
+          auto tref = track->get_tref_box();
+          auto references = tref->get_references(fourcc("auxl"));
+          if (std::any_of(references.begin(), references.end(), [this](uint32_t id) { return id == get_id(); })) {
+
+            // Assign it
+
+            m_aux_alpha_track = std::dynamic_pointer_cast<Track_Visual>(track);
+          }
+        }
+      }
+    }
   }
 }
 
@@ -71,74 +127,84 @@ Track_Visual::Track_Visual(HeifContext* ctx, uint32_t track_id, uint16_t width, 
 }
 
 
-Result<std::shared_ptr<HeifPixelImage>> Track_Visual::decode_next_image_sample(const struct heif_decoding_options& options)
+Result<std::shared_ptr<HeifPixelImage>> Track_Visual::decode_next_image_sample(const heif_decoding_options& options)
 {
-  if (m_current_chunk > m_chunks.size()) {
+  uint64_t num_output_samples = m_num_output_samples;
+  if (options.ignore_sequence_editlist) {
+    num_output_samples = m_num_samples;
+  }
+
+  if (m_next_sample_to_be_processed >= num_output_samples) {
     return Error{heif_error_End_of_sequence,
                  heif_suberror_Unspecified,
                  "End of sequence"};
   }
 
-  while (m_next_sample_to_be_processed > m_chunks[m_current_chunk]->last_sample_number()) {
-    m_current_chunk++;
+  const auto& sampleTiming = m_presentation_timeline[m_next_sample_to_be_processed % m_presentation_timeline.size()];
+  uint32_t sample_idx = sampleTiming.sampleIdx;
+  uint32_t chunk_idx = sampleTiming.chunkIdx;
 
-    if (m_current_chunk > m_chunks.size()) {
-      return Error{heif_error_End_of_sequence,
-                   heif_suberror_Unspecified,
-                   "End of sequence"};
-    }
-  }
-
-  const std::shared_ptr<Chunk>& chunk = m_chunks[m_current_chunk];
+  const std::shared_ptr<Chunk>& chunk = m_chunks[chunk_idx];
 
   auto decoder = chunk->get_decoder();
   assert(decoder);
 
-  decoder->set_data_extent(chunk->get_data_extent_for_sample(m_next_sample_to_be_processed));
+  decoder->set_data_extent(chunk->get_data_extent_for_sample(sample_idx));
 
   Result<std::shared_ptr<HeifPixelImage>> decodingResult = decoder->decode_single_frame_from_compressed_data(options,
                                                                                                              m_heif_context->get_security_limits());
-  if (decodingResult.error) {
+  if (!decodingResult) {
     m_next_sample_to_be_processed++;
-    return decodingResult.error;
+    return decodingResult.error();
   }
 
-  auto image = decodingResult.value;
+  auto image = *decodingResult;
 
   if (m_stts) {
-    image->set_sample_duration(m_stts->get_sample_duration(m_next_sample_to_be_processed));
+    image->set_sample_duration(m_stts->get_sample_duration(sample_idx));
   }
+
+  // --- assign alpha if we have an assigned alpha track
+
+  if (m_aux_alpha_track) {
+    auto alphaResult = m_aux_alpha_track->decode_next_image_sample(options);
+    if (!alphaResult) {
+      return alphaResult.error();
+    }
+
+    auto alphaImage = *alphaResult;
+    image->transfer_plane_from_image_as(alphaImage, heif_channel_Y, heif_channel_Alpha);
+  }
+
 
   // --- read sample auxiliary data
 
-#if HEIF_ENABLE_EXPERIMENTAL_FEATURES
   if (m_aux_reader_content_ids) {
-    auto readResult = m_aux_reader_content_ids->get_sample_info(get_file().get(), m_next_sample_to_be_processed);
-    if (readResult.error) {
-      return readResult.error;
+    auto readResult = m_aux_reader_content_ids->get_sample_info(get_file().get(), sample_idx);
+    if (!readResult) {
+      return readResult.error();
     }
 
-    Result<std::string> convResult = vector_to_string(readResult.value);
-    if (convResult.error) {
-      return convResult.error;
+    Result<std::string> convResult = vector_to_string(*readResult);
+    if (!convResult) {
+      return convResult.error();
     }
 
-    image->set_gimi_sample_content_id(convResult.value);
+    image->set_gimi_sample_content_id(*convResult);
   }
-#endif
 
   if (m_aux_reader_tai_timestamps) {
-    auto readResult = m_aux_reader_tai_timestamps->get_sample_info(get_file().get(), m_next_sample_to_be_processed);
-    if (readResult.error) {
-      return readResult.error;
+    auto readResult = m_aux_reader_tai_timestamps->get_sample_info(get_file().get(), sample_idx);
+    if (!readResult) {
+      return readResult.error();
     }
 
-    auto resultTai = Box_itai::decode_tai_from_vector(readResult.value);
-    if (resultTai.error) {
-      return resultTai.error;
+    auto resultTai = Box_itai::decode_tai_from_vector(*readResult);
+    if (!resultTai) {
+      return resultTai.error();
     }
 
-    image->set_tai_timestamp(&resultTai.value);
+    image->set_tai_timestamp(&*resultTai);
   }
 
   m_next_sample_to_be_processed++;
@@ -148,8 +214,8 @@ Result<std::shared_ptr<HeifPixelImage>> Track_Visual::decode_next_image_sample(c
 
 
 Error Track_Visual::encode_image(std::shared_ptr<HeifPixelImage> image,
-                                 struct heif_encoder* h_encoder,
-                                 const struct heif_encoding_options& in_options,
+                                 heif_encoder* h_encoder,
+                                 const heif_encoding_options& in_options,
                                  heif_image_input_class input_class)
 {
   if (image->get_width() > 0xFFFF ||
@@ -187,20 +253,20 @@ Error Track_Visual::encode_image(std::shared_ptr<HeifPixelImage> image,
                                                                                                     h_encoder,
                                                                                                     options,
                                                                                                     m_heif_context->get_security_limits());
-  if (srcImageResult.error) {
-    return srcImageResult.error;
+  if (!srcImageResult) {
+    return srcImageResult.error();
   }
 
-  std::shared_ptr<HeifPixelImage> colorConvertedImage = srcImageResult.value;
+  std::shared_ptr<HeifPixelImage> colorConvertedImage = *srcImageResult;
 
   // --- encode image
 
   Result<Encoder::CodedImageData> encodeResult = encoder->encode(colorConvertedImage, h_encoder, options, input_class);
-  if (encodeResult.error) {
-    return encodeResult.error;
+  if (!encodeResult) {
+    return encodeResult.error();
   }
 
-  const Encoder::CodedImageData& data = encodeResult.value;
+  const Encoder::CodedImageData& data = *encodeResult;
 
 
   // --- generate SampleDescriptionBox

@@ -75,7 +75,7 @@ ImageItem_uncompressed::ImageItem_uncompressed(HeifContext* ctx)
 }
 
 
-Result<std::shared_ptr<HeifPixelImage>> ImageItem_uncompressed::decode_compressed_image(const struct heif_decoding_options& options,
+Result<std::shared_ptr<HeifPixelImage>> ImageItem_uncompressed::decode_compressed_image(const heif_decoding_options& options,
                                                                                 bool decode_tile_only, uint32_t tile_x0, uint32_t tile_y0) const
 {
   std::shared_ptr<HeifPixelImage> img;
@@ -114,7 +114,7 @@ struct unciHeaders
 
 static Result<unciHeaders> generate_headers(const std::shared_ptr<const HeifPixelImage>& src_image,
                                             const heif_unci_image_parameters* parameters,
-                                            const struct heif_encoding_options* options)
+                                            const heif_encoding_options* options)
 {
   unciHeaders headers;
 
@@ -272,16 +272,16 @@ Result<std::vector<uint8_t>> encode_image_tile(const std::shared_ptr<const HeifP
 
 
 Result<Encoder::CodedImageData> ImageItem_uncompressed::encode(const std::shared_ptr<HeifPixelImage>& src_image,
-                                                                 struct heif_encoder* encoder,
-                                                                 const struct heif_encoding_options& options,
-                                                                 enum heif_image_input_class input_class)
+                                                                 heif_encoder* encoder,
+                                                                 const heif_encoding_options& options,
+                                                                 heif_image_input_class input_class)
 {
   return encode_static(src_image, options);
 }
 
 
 Result<Encoder::CodedImageData> ImageItem_uncompressed::encode_static(const std::shared_ptr<HeifPixelImage>& src_image,
-                                                               const struct heif_encoding_options& options)
+                                                               const heif_encoding_options& options)
 {
   auto parameters = std::unique_ptr<heif_unci_image_parameters,
                                     void (*)(heif_unci_image_parameters*)>(heif_unci_image_parameters_alloc(),
@@ -296,8 +296,8 @@ Result<Encoder::CodedImageData> ImageItem_uncompressed::encode_static(const std:
   // --- generate configuration property boxes
 
   Result<unciHeaders> genHeadersResult = generate_headers(src_image, parameters.get(), &options);
-  if (genHeadersResult.error) {
-    return genHeadersResult.error;
+  if (!genHeadersResult) {
+    return genHeadersResult.error();
   }
 
   const unciHeaders& headers = *genHeadersResult;
@@ -314,8 +314,8 @@ Result<Encoder::CodedImageData> ImageItem_uncompressed::encode_static(const std:
   // --- encode image
 
   Result<std::vector<uint8_t>> codedBitstreamResult = encode_image_tile(src_image);
-  if (codedBitstreamResult.error) {
-    return codedBitstreamResult.error;
+  if (!codedBitstreamResult) {
+    return codedBitstreamResult.error();
   }
 
   codedImageData.bitstream = *codedBitstreamResult;
@@ -326,7 +326,7 @@ Result<Encoder::CodedImageData> ImageItem_uncompressed::encode_static(const std:
 
 Result<std::shared_ptr<ImageItem_uncompressed>> ImageItem_uncompressed::add_unci_item(HeifContext* ctx,
                                                                                       const heif_unci_image_parameters* parameters,
-                                                                                      const struct heif_encoding_options* encoding_options,
+                                                                                      const heif_encoding_options* encoding_options,
                                                                                       const std::shared_ptr<const HeifPixelImage>& prototype)
 {
   // Check input parameters
@@ -351,8 +351,8 @@ Result<std::shared_ptr<ImageItem_uncompressed>> ImageItem_uncompressed::add_unci
   // Generate headers
 
   Result<unciHeaders> genHeadersResult = generate_headers(prototype, parameters, encoding_options);
-  if (genHeadersResult.error) {
-    return genHeadersResult.error;
+  if (!genHeadersResult) {
+    return genHeadersResult.error();
   }
 
   const unciHeaders& headers = *genHeadersResult;
@@ -437,8 +437,8 @@ Error ImageItem_uncompressed::add_image_tile(uint32_t tile_x, uint32_t tile_y, c
   uint32_t tile_idx = tile_y * uncC->get_number_of_tile_columns() + tile_x;
 
   Result<std::vector<uint8_t>> codedBitstreamResult = encode_image_tile(image);
-  if (codedBitstreamResult.error) {
-    return codedBitstreamResult.error;
+  if (!codedBitstreamResult) {
+    return codedBitstreamResult.error();
   }
 
   std::shared_ptr<Box_cmpC> cmpC = get_property<Box_cmpC>();
@@ -456,7 +456,7 @@ Error ImageItem_uncompressed::add_image_tile(uint32_t tile_x, uint32_t tile_y, c
   }
   else {
     std::vector<uint8_t> compressed_data;
-    const std::vector<uint8_t>& raw_data = codedBitstreamResult.value;
+    const std::vector<uint8_t>& raw_data = std::move(*codedBitstreamResult);
     (void)raw_data;
 
     uint32_t compr = cmpC->get_compression_type();
@@ -539,7 +539,7 @@ std::shared_ptr<Encoder> ImageItem_uncompressed::get_encoder() const
   return m_encoder;
 }
 
-Error ImageItem_uncompressed::on_load_file()
+Error ImageItem_uncompressed::initialize_decoder()
 {
   std::shared_ptr<Box_cmpd> cmpd = get_property<Box_cmpd>();
   std::shared_ptr<Box_uncC> uncC = get_property<Box_uncC>();
@@ -553,12 +553,15 @@ Error ImageItem_uncompressed::on_load_file()
 
   m_decoder = std::make_shared<Decoder_uncompressed>(uncC, cmpd, ispe);
 
+  return Error::Ok;
+}
+
+void ImageItem_uncompressed::set_decoder_input_data()
+{
   DataExtent extent;
   extent.set_from_image_item(get_context()->get_heif_file(), get_id());
 
   m_decoder->set_data_extent(std::move(extent));
-
-  return Error::Ok;
 }
 
 

@@ -22,15 +22,17 @@
 #include "hevc_boxes.h"
 #include "error.h"
 #include "context.h"
-#include "libheif/api_structs.h"
+#include "api_structs.h"
 
 #include <string>
 
+#include "plugins/nalu_utils.h"
+
 
 Result<Encoder::CodedImageData> Encoder_HEVC::encode(const std::shared_ptr<HeifPixelImage>& image,
-                                                     struct heif_encoder* encoder,
-                                                     const struct heif_encoding_options& options,
-                                                     enum heif_image_input_class input_class)
+                                                     heif_encoder* encoder,
+                                                     const heif_encoding_options& options,
+                                                     heif_image_input_class input_class)
 {
   CodedImageData codedImage;
 
@@ -39,7 +41,7 @@ Result<Encoder::CodedImageData> Encoder_HEVC::encode(const std::shared_ptr<HeifP
   heif_image c_api_image;
   c_api_image.image = image;
 
-  struct heif_error err = encoder->plugin->encode_image(encoder->encoder, &c_api_image, input_class);
+  heif_error err = encoder->plugin->encode_image(encoder->encoder, &c_api_image, input_class);
   if (err.code) {
     return Error(err.code,
                  err.subcode,
@@ -60,9 +62,7 @@ Result<Encoder::CodedImageData> Encoder_HEVC::encode(const std::shared_ptr<HeifP
     }
 
 
-    const uint8_t NAL_SPS = 33;
-
-    if ((data[0] >> 1) == NAL_SPS) {
+    if ((data[0] >> 1) == NAL_UNIT_SPS_NUT) {
       parse_sps_for_hvcC_configuration(data, size, &hvcC->get_configuration(), &encoded_width, &encoded_height);
 
       codedImage.encoded_image_width = encoded_width;
@@ -70,15 +70,14 @@ Result<Encoder::CodedImageData> Encoder_HEVC::encode(const std::shared_ptr<HeifP
     }
 
     switch (data[0] >> 1) {
-      case 0x20:
-      case 0x21:
-      case 0x22:
+      case NAL_UNIT_VPS_NUT:
+      case NAL_UNIT_SPS_NUT:
+      case NAL_UNIT_PPS_NUT:
         hvcC->append_nal_data(data, size);
         break;
 
       default:
         codedImage.append_with_4bytes_size(data, size);
-        // m_heif_file->append_iloc_data_with_4byte_size(image_id, data, size);
     }
   }
 
@@ -112,7 +111,7 @@ Result<Encoder::CodedImageData> Encoder_HEVC::encode(const std::shared_ptr<HeifP
 }
 
 
-std::shared_ptr<class Box_VisualSampleEntry> Encoder_HEVC::get_sample_description_box(const CodedImageData& data) const
+std::shared_ptr<Box_VisualSampleEntry> Encoder_HEVC::get_sample_description_box(const CodedImageData& data) const
 {
   auto hvc1 = std::make_shared<Box_hvc1>();
   hvc1->get_VisualSampleEntry().compressorname = "HEVC";

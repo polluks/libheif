@@ -216,7 +216,7 @@ ImageItem_Overlay::ImageItem_Overlay(HeifContext* ctx, heif_item_id id)
 }
 
 
-Error ImageItem_Overlay::on_load_file()
+Error ImageItem_Overlay::initialize_decoder()
 {
   Error err = read_overlay_spec();
   if (err) {
@@ -252,13 +252,12 @@ Error ImageItem_Overlay::read_overlay_spec()
   */
 
 
-  std::vector<uint8_t> overlay_data;
-  Error err = heif_file->get_uncompressed_item_data(get_id(), &overlay_data);
-  if (err) {
-    return err;
+  auto overlayDataResult = heif_file->get_uncompressed_item_data(get_id());
+  if (!overlayDataResult) {
+    return overlayDataResult.error();
   }
 
-  err = m_overlay_spec.parse(m_overlay_image_ids.size(), overlay_data);
+  Error err = m_overlay_spec.parse(m_overlay_image_ids.size(), *overlayDataResult);
   if (err) {
     return err;
   }
@@ -273,7 +272,7 @@ Error ImageItem_Overlay::read_overlay_spec()
 }
 
 
-Result<std::shared_ptr<HeifPixelImage>> ImageItem_Overlay::decode_compressed_image(const struct heif_decoding_options& options,
+Result<std::shared_ptr<HeifPixelImage>> ImageItem_Overlay::decode_compressed_image(const heif_decoding_options& options,
                                                                                    bool decode_tile_only, uint32_t tile_x0, uint32_t tile_y0) const
 {
   return decode_overlay_image(options);
@@ -334,21 +333,23 @@ Result<std::shared_ptr<HeifPixelImage>> ImageItem_Overlay::decode_overlay_image(
     }
 
     auto decodeResult = imgItem->decode_image(options, false, 0,0);
-    if (decodeResult.error) {
-      return decodeResult.error;
+    if (!decodeResult) {
+      return decodeResult.error();
     }
 
-    std::shared_ptr<HeifPixelImage> overlay_img = decodeResult.value;
+    std::shared_ptr<HeifPixelImage> overlay_img = *decodeResult;
 
 
     // process overlay in RGB space
 
     if (overlay_img->get_colorspace() != heif_colorspace_RGB ||
         overlay_img->get_chroma_format() != heif_chroma_444) {
-      auto overlay_img_result = convert_colorspace(overlay_img, heif_colorspace_RGB, heif_chroma_444, nullptr, 0, options.color_conversion_options, options.color_conversion_options_ext,
+      auto overlay_img_result = convert_colorspace(overlay_img, heif_colorspace_RGB, heif_chroma_444,
+                                                   nclx_profile::undefined(),
+                                                   0, options.color_conversion_options, options.color_conversion_options_ext,
                                                    get_context()->get_security_limits());
-      if (overlay_img_result.error) {
-        return overlay_img_result.error;
+      if (!overlay_img_result) {
+        return overlay_img_result.error();
       }
       else {
         overlay_img = *overlay_img_result;

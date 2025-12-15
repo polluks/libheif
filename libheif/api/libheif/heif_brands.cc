@@ -98,21 +98,45 @@ int heif_has_compatible_brand(const uint8_t* data, int len, const char* brand_fo
 }
 
 
-struct heif_error heif_list_compatible_brands(const uint8_t* data, int len, heif_brand2** out_brands, int* out_size)
+heif_error heif_list_compatible_brands(const uint8_t* data, int len, heif_brand2** out_brands, int* out_size)
 {
   if (data == nullptr || out_brands == nullptr || out_size == nullptr) {
-    return {heif_error_Usage_error, heif_suberror_Null_pointer_argument, "NULL argument"};
+    return heif_error_null_pointer_argument;
   }
 
   if (len <= 0) {
     return {heif_error_Usage_error, heif_suberror_Invalid_parameter_value, "data length must be positive"};
   }
 
+  const heif_security_limits* security_limits = heif_get_global_security_limits();
+
+
+  // --- check that file begins with ftyp box
+
+  {
+    auto stream = std::make_shared<StreamReader_memory>(data, len, false);
+    BitstreamRange range(stream, len);
+
+    BoxHeader hdr;
+    Error err = hdr.parse_header(range);
+    if (err) {
+      return {err.error_code, err.sub_error_code, "error reading ftype box header"};
+    }
+
+    if (hdr.get_short_type() != fourcc("ftyp")) {
+      return {
+        heif_error_Invalid_input,
+        heif_suberror_Unspecified,
+        "File does not begin with 'ftyp' box."
+      };
+    }
+  }
+
   auto stream = std::make_shared<StreamReader_memory>(data, len, false);
   BitstreamRange range(stream, len);
 
   std::shared_ptr<Box> box;
-  Error err = Box::read(range, &box, heif_get_global_security_limits());
+  Error err = Box::read(range, &box, security_limits);
   if (err) {
     if (err.sub_error_code == heif_suberror_End_of_data) {
       return {err.error_code, err.sub_error_code, "insufficient input data"};
@@ -128,6 +152,15 @@ struct heif_error heif_list_compatible_brands(const uint8_t* data, int len, heif
 
   auto brands = ftyp->list_brands();
   size_t nBrands = brands.size();
+
+  if (nBrands > security_limits->max_number_of_file_brands) {
+    return {
+      heif_error_Memory_allocation_error,
+      heif_suberror_Security_limit_exceeded,
+      "File contains more brands than allowed by security limits."
+    };
+  }
+
   *out_brands = (heif_brand2*) malloc(sizeof(heif_brand2) * nBrands);
   *out_size = (int)nBrands;
 

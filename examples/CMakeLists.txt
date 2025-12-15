@@ -52,7 +52,7 @@ if (WITH_HEADER_COMPRESSION)
 endif ()
 
 
-if (PNG_FOUND)
+if (WITH_EXAMPLE_HEIF_THUMB AND PNG_FOUND)
     add_executable(heif-thumbnailer ${getopt_sources}
             heif_thumbnailer.cc
             common.cc
@@ -76,8 +76,7 @@ if (WITH_EXAMPLE_HEIF_VIEW)
                 sdl.hh
                 common.cc
                 common.h)
-        target_link_libraries(heif-view PRIVATE heif ${SDL2_LIBRARIES})
-        target_include_directories(heif-view PRIVATE ${libheif_SOURCE_DIR} ${SDL2_INCLUDE_DIRS})
+        target_link_libraries(heif-view PRIVATE heif SDL2::SDL2main SDL2::SDL2)
         install(TARGETS heif-view RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     endif ()
 endif ()

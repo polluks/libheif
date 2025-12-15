@@ -26,7 +26,7 @@
 #include <future>
 #include <set>
 #include <algorithm>
-#include <libheif/api_structs.h>
+#include "api_structs.h"
 #include "security_limits.h"
 
 
@@ -163,7 +163,7 @@ ImageItem_Grid::~ImageItem_Grid()
 }
 
 
-Error ImageItem_Grid::on_load_file()
+Error ImageItem_Grid::initialize_decoder()
 {
   Error err = read_grid_spec();
   if (err) {
@@ -178,13 +178,12 @@ Error ImageItem_Grid::read_grid_spec()
 {
   auto heif_file = get_context()->get_heif_file();
 
-  std::vector<uint8_t> grid_data;
-  Error err = heif_file->get_uncompressed_item_data(get_id(), &grid_data);
-  if (err) {
-    return err;
+  auto gridDataResult = heif_file->get_uncompressed_item_data(get_id());
+  if (!gridDataResult) {
+    return gridDataResult.error();
   }
 
-  err = m_grid_spec.parse(grid_data);
+  Error err = m_grid_spec.parse(*gridDataResult);
   if (err) {
     return err;
   }
@@ -217,7 +216,7 @@ Error ImageItem_Grid::read_grid_spec()
 }
 
 
-Result<std::shared_ptr<HeifPixelImage>> ImageItem_Grid::decode_compressed_image(const struct heif_decoding_options& options,
+Result<std::shared_ptr<HeifPixelImage>> ImageItem_Grid::decode_compressed_image(const heif_decoding_options& options,
                                                                                 bool decode_tile_only, uint32_t tile_x0, uint32_t tile_y0) const
 {
   if (decode_tile_only) {
@@ -437,11 +436,11 @@ Error ImageItem_Grid::decode_and_paste_tile_image(heif_item_id tileID, uint32_t 
   }
 
   auto decodeResult = tileItem->decode_image(options, false, 0, 0);
-  if (decodeResult.error) {
-    return decodeResult.error;
+  if (!decodeResult) {
+    return decodeResult.error();
   }
 
-  tile_img = decodeResult.value;
+  tile_img = *decodeResult;
 
   uint32_t w = get_grid_spec().get_width();
   uint32_t h = get_grid_spec().get_height();
@@ -627,7 +626,7 @@ Result<std::shared_ptr<ImageItem_Grid>> ImageItem_Grid::add_new_grid_item(HeifCo
                                                                           uint32_t output_height,
                                                                           uint16_t tile_rows,
                                                                           uint16_t tile_columns,
-                                                                          const struct heif_encoding_options* encoding_options)
+                                                                          const heif_encoding_options* encoding_options)
 {
   std::shared_ptr<ImageItem_Grid> grid_image;
   if (tile_rows > 0xFFFF / tile_columns) {
@@ -678,7 +677,7 @@ Result<std::shared_ptr<ImageItem_Grid>> ImageItem_Grid::add_new_grid_item(HeifCo
 
 Error ImageItem_Grid::add_image_tile(uint32_t tile_x, uint32_t tile_y,
                                      const std::shared_ptr<HeifPixelImage>& image,
-                                     struct heif_encoder* encoder)
+                                     heif_encoder* encoder)
 {
   auto encoding_options = get_encoding_options();
 
@@ -686,8 +685,8 @@ Error ImageItem_Grid::add_image_tile(uint32_t tile_x, uint32_t tile_y,
                                             encoder,
                                             *encoding_options,
                                             heif_image_input_class_normal);
-  if (encodingResult.error != Error::Ok) {
-    return encodingResult.error;
+  if (!encodingResult) {
+    return encodingResult.error();
   }
 
   std::shared_ptr<ImageItem> encoded_image = *encodingResult;
@@ -705,6 +704,24 @@ Error ImageItem_Grid::add_image_tile(uint32_t tile_x, uint32_t tile_y,
   auto pixi = encoded_image->get_property<Box_pixi>();
   add_property(pixi, true);
 
+  // copy over extra properties to grid item
+
+  if (tile_x == 0 && tile_y == 0) {
+    auto property_boxes = encoded_image->generate_property_boxes();
+    for (auto& property : property_boxes) {
+      add_property(property, is_property_essential(property));
+    }
+
+    // add color profile similar to first tile image
+    // TODO: this shouldn't be necessary. The colr profiles should be in the ImageExtraData above.
+    auto colr_boxes = add_color_profile(image, *encoding_options,
+                                        heif_image_input_class_normal,
+                                        encoding_options->output_nclx_profile);
+    for (auto& property : colr_boxes) {
+      add_property(property, is_property_essential(property));
+    }
+  }
+
   return Error::Ok;
 }
 
@@ -713,8 +730,8 @@ Result<std::shared_ptr<ImageItem_Grid>> ImageItem_Grid::add_and_encode_full_grid
                                                                                  const std::vector<std::shared_ptr<HeifPixelImage>>& tiles,
                                                                                  uint16_t rows,
                                                                                  uint16_t columns,
-                                                                                 struct heif_encoder* encoder,
-                                                                                 const struct heif_encoding_options& options)
+                                                                                 heif_encoder* encoder,
+                                                                                 const heif_encoding_options& options)
 {
   std::shared_ptr<ImageItem_Grid> griditem;
 
@@ -741,8 +758,8 @@ Result<std::shared_ptr<ImageItem_Grid>> ImageItem_Grid::add_and_encode_full_grid
                                             encoder,
                                             options,
                                             heif_image_input_class_normal);
-    if (encodingResult.error) {
-      return encodingResult.error;
+    if (!encodingResult) {
+      return encodingResult.error();
     }
     else {
       out_tile = *encodingResult;
@@ -781,6 +798,13 @@ Result<std::shared_ptr<ImageItem_Grid>> ImageItem_Grid::add_and_encode_full_grid
   // Add PIXI property (copy from first tile)
 
   griditem->add_property(pixi_property, true);
+
+  // copy over extra properties to grid item
+
+  auto property_boxes = tiles[0]->generate_property_boxes();
+  for (auto& property : property_boxes) {
+    griditem->add_property(property, griditem->is_property_essential(property));
+  }
 
   // Set Brands
 

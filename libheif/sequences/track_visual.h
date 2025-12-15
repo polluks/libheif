@@ -34,19 +34,26 @@ public:
   Track_Visual(HeifContext* ctx, uint32_t track_id, uint16_t width, uint16_t height,
                const TrackOptions* options, uint32_t handler_type);
 
-  Track_Visual(HeifContext* ctx, const std::shared_ptr<Box_trak>&); // when reading the file
+  Track_Visual(HeifContext* ctx);
 
   ~Track_Visual() override = default;
+
+  // load track from file
+  Error load(const std::shared_ptr<Box_trak>&) override;
+
+  void initialize_after_parsing(HeifContext* ctx, const std::vector<std::shared_ptr<Track>>& all_tracks) override;
 
   uint16_t get_width() const { return m_width; }
 
   uint16_t get_height() const { return m_height; }
 
-  Result<std::shared_ptr<HeifPixelImage>> decode_next_image_sample(const struct heif_decoding_options& options);
+  bool has_alpha_channel() const override { return m_aux_alpha_track != nullptr; }
+
+  Result<std::shared_ptr<HeifPixelImage>> decode_next_image_sample(const heif_decoding_options& options);
 
   Error encode_image(std::shared_ptr<HeifPixelImage> image,
-                     struct heif_encoder* encoder,
-                     const struct heif_encoding_options& options,
+                     heif_encoder* encoder,
+                     const heif_encoding_options& options,
                      heif_image_input_class image_class);
 
   heif_brand2 get_compatible_brand() const;
@@ -54,6 +61,9 @@ public:
 private:
   uint16_t m_width = 0;
   uint16_t m_height = 0;
+
+  // If there is an alpha-channel track associated with this color track, we reference it from here
+  std::shared_ptr<Track_Visual> m_aux_alpha_track;
 };
 
 

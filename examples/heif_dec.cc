@@ -27,6 +27,7 @@
 
 #include <cstring>
 #include <getopt.h>
+#include <unordered_set>
 #include <filesystem>
 #include "libheif/heif_items.h"
 #include "libheif/heif_experimental.h"
@@ -107,6 +108,7 @@ static void show_help(const char* argv0)
                "      --tiles                    output all image tiles as separate images\n"
                "      --quiet                    do not output status messages to console\n"
                "  -S, --sequence                 decode image sequence instead of still image\n"
+               "      --ignore-editlist          show the raw media sequence timeline without repetitions\n"
                "  -C, --chroma-upsampling ALGO   Force chroma upsampling algorithm (nn = nearest-neighbor / bilinear)\n"
                "      --png-compression-level #  Set to integer between 0 (fastest) and 9 (best). Use -1 for default.\n"
                "      --transparency-composition-mode MODE  Controls how transparent images are rendered when the output format\n"
@@ -118,7 +120,7 @@ static void show_help(const char* argv0)
 class ContextReleaser
 {
 public:
-  ContextReleaser(struct heif_context* ctx) : ctx_(ctx)
+  ContextReleaser(heif_context* ctx) : ctx_(ctx)
   {}
 
   ~ContextReleaser()
@@ -127,7 +129,7 @@ public:
   }
 
 private:
-  struct heif_context* ctx_;
+  heif_context* ctx_;
 };
 
 
@@ -142,6 +144,7 @@ int option_png_compression_level = -1; // use zlib default
 int option_output_tiles = 0;
 int option_disable_limits = 0;
 int option_sequence = 0;
+int option_ignore_editlist = 0;
 std::string output_filename;
 
 std::string chroma_upsampling;
@@ -150,7 +153,7 @@ std::string transparency_composition_mode = "checkerboard";
 #define OPTION_PNG_COMPRESSION_LEVEL 1000
 #define OPTION_TRANSPARENCY_COMPOSITION_MODE 1001
 
-static struct option long_options[] = {
+static option long_options[] = {
     {(char* const) "quality",          required_argument, 0,                        'q'},
     {(char* const) "strict",           no_argument,       0,                        's'},
     {(char* const) "decoder",          required_argument, 0,                        'd'},
@@ -170,6 +173,7 @@ static struct option long_options[] = {
     {(char* const) "transparency-composition-mode", required_argument, 0,  OPTION_TRANSPARENCY_COMPOSITION_MODE},
     {(char* const) "version",          no_argument,       0,                        'v'},
     {(char* const) "disable-limits", no_argument, &option_disable_limits, 1},
+    {(char* const) "ignore-editlist", no_argument, &option_ignore_editlist, 1},
     {nullptr, no_argument, nullptr, 0}
 };
 
@@ -202,6 +206,21 @@ void show_png_compression_level_usage_warning()
                   "You can also use -1 to use the default compression level.\n");
 }
 
+std::string sanitizeFilename(const std::string& filename) {
+  static const std::unordered_set<char> invalidChars = {'\\','/','*','?','"','<','>','|', ':'};
+  std::string sanitized;
+  sanitized.reserve(filename.size()); // avoid reallocations
+
+  for (char c : filename) {
+    if (invalidChars.find(c) != invalidChars.end()) {
+      sanitized += '_';
+    } else {
+      sanitized += c;
+    }
+  }
+  return sanitized;
+}
+
 
 int decode_single_image(heif_image_handle* handle,
                         std::string filename_stem,
@@ -217,8 +236,8 @@ int decode_single_image(heif_image_handle* handle,
 
   int has_alpha = heif_image_handle_has_alpha_channel(handle);
 
-  struct heif_image* image;
-  struct heif_error err;
+  heif_image* image;
+  heif_error err;
   err = heif_decode_image(handle,
                           &image,
                           encoder->colorspace(has_alpha),
@@ -264,7 +283,7 @@ int decode_single_image(heif_image_handle* handle,
         assert(nDepthImages == 1);
         (void) nDepthImages;
 
-        struct heif_image_handle* depth_handle = nullptr;
+        heif_image_handle* depth_handle = nullptr;
         err = heif_image_handle_get_depth_image_handle(handle, depth_id, &depth_handle);
         if (err.code) {
           std::cerr << "Could not read depth channel\n";
@@ -273,7 +292,7 @@ int decode_single_image(heif_image_handle* handle,
 
         int depth_bit_depth = heif_image_handle_get_luma_bits_per_pixel(depth_handle);
 
-        struct heif_image* depth_image;
+        heif_image* depth_image;
         err = heif_decode_image(depth_handle,
                                 &depth_image,
                                 encoder->colorspace(false),
@@ -319,7 +338,7 @@ int decode_single_image(heif_image_handle* handle,
 
         for (heif_item_id auxId : auxIDs) {
 
-          struct heif_image_handle* aux_handle = nullptr;
+          heif_image_handle* aux_handle = nullptr;
           err = heif_image_handle_get_auxiliary_image_handle(handle, auxId, &aux_handle);
           if (err.code) {
             std::cerr << "Could not read auxiliary image\n";
@@ -328,7 +347,7 @@ int decode_single_image(heif_image_handle* handle,
 
           int aux_bit_depth = heif_image_handle_get_luma_bits_per_pixel(aux_handle);
 
-          struct heif_image* aux_image = nullptr;
+          heif_image* aux_image = nullptr;
           err = heif_decode_image(aux_handle,
                                   &aux_image,
                                   encoder->colorspace(false),
@@ -359,7 +378,7 @@ int decode_single_image(heif_image_handle* handle,
 
           std::ostringstream s;
           s << filename_stem;
-          s << "-" + auxType + ".";
+          s << "-" + sanitizeFilename(auxType) + ".";
           s << filename_suffix;
 
           std::string auxFilename = s.str();
@@ -495,8 +514,8 @@ int decode_image_tiles(heif_image_handle* handle,
 
   for (uint32_t ty = 0; ty < tiling.num_rows; ty++)
     for (uint32_t tx = 0; tx < tiling.num_columns; tx++) {
-      struct heif_image* image;
-      struct heif_error err;
+      heif_image* image;
+      heif_error err;
       err = heif_image_handle_decode_image_tile(handle,
                                                 &image,
                                                 encoder->colorspace(has_alpha),
@@ -753,7 +772,7 @@ int main(int argc, char** argv)
 
   // --- read the HEIF file
 
-  struct heif_context* ctx = heif_context_alloc();
+  heif_context* ctx = heif_context_alloc();
   if (!ctx) {
     fprintf(stderr, "Could not create context object\n");
     return 1;
@@ -764,7 +783,7 @@ int main(int argc, char** argv)
   }
 
   ContextReleaser cr(ctx);
-  struct heif_error err;
+  heif_error err;
   err = heif_context_read_from_file(ctx, input_filename.c_str(), nullptr);
   if (err.code != 0) {
     std::cerr << "Could not read HEIF/AVIF file: " << err.message << "\n";
@@ -789,7 +808,8 @@ int main(int argc, char** argv)
       std::cout << "#" << id << " : " << heif_examples::fourcc_to_string(heif_track_get_track_handler_type(track));
 
       if (heif_track_get_track_handler_type(track) == heif_track_type_image_sequence ||
-          heif_track_get_track_handler_type(track) == heif_track_type_video) {
+          heif_track_get_track_handler_type(track) == heif_track_type_video ||
+          heif_track_get_track_handler_type(track) == heif_track_type_auxiliary) {
         uint16_t w,h;
         heif_track_get_image_resolution(track, &w, &h);
         std::cout << " " << w << "x" << h;
@@ -810,7 +830,7 @@ int main(int argc, char** argv)
         // get metadata track samples
 
         for (;;) {
-          struct heif_raw_sequence_sample* sample;
+          heif_raw_sequence_sample* sample;
           err = heif_track_get_next_raw_sequence_sample(track, &sample);
           if (err.code != 0) {
             break;
@@ -833,6 +853,7 @@ int main(int argc, char** argv)
 
     std::unique_ptr<heif_decoding_options, void(*)(heif_decoding_options*)> decode_options(heif_decoding_options_alloc(), heif_decoding_options_free);
     encoder->UpdateDecodingOptions(nullptr, decode_options.get());
+    decode_options->ignore_sequence_editlist = option_ignore_editlist;
 
     struct heif_track* track = heif_context_get_track(ctx, 0);
 
@@ -848,12 +869,14 @@ int main(int argc, char** argv)
                 << taic->clock_drift_rate << " / " << int(taic->clock_type) << "\n";
     }
 
+    int with_alpha = heif_track_has_alpha_channel(track);
+
     for (int i=0; ;i++) {
       heif_image* out_image = nullptr;
       int bit_depth = 8; // TODO
       err = heif_track_decode_next_image(track, &out_image,
                                          encoder->colorspace(false),
-                                         encoder->chroma(false, bit_depth),
+                                         encoder->chroma(with_alpha, bit_depth),
                                          decode_options.get());
       if (err.code == heif_error_End_of_sequence) {
         break;

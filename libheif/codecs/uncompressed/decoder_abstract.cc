@@ -181,11 +181,11 @@ const Error AbstractDecoder::get_compressed_image_data_uncompressed(const DataEx
   if (!cmpC_box) {
     // assume no generic compression
     auto readResult = dataExtent.read_data(range_start_offset, range_size);
-    if (readResult.error) {
-      return readResult.error;
+    if (!readResult) {
+      return readResult.error();
     }
 
-    data->insert(data->end(), readResult.value.begin(), readResult.value.end());
+    data->insert(data->end(), readResult->begin(), readResult->end());
 
     return Error::Ok;
   }
@@ -202,37 +202,55 @@ const Error AbstractDecoder::get_compressed_image_data_uncompressed(const DataEx
 
     // get data needed for one tile
     Result<std::vector<uint8_t>> readingResult = dataExtent.read_data(unit.unit_offset, unit.unit_size);
-    if (readingResult.error) {
-      return readingResult.error;
+    if (!readingResult) {
+      return readingResult.error();
     }
 
-    const std::vector<uint8_t>& compressed_bytes = readingResult.value;
+    const std::vector<uint8_t>& compressed_bytes = *readingResult;
 
     // decompress only the unit
-    Error err = do_decompress_data(cmpC_box, compressed_bytes, data);
-    if (err) {
-      return err;
+    auto dataResult = do_decompress_data(cmpC_box, compressed_bytes);
+    if (!dataResult) {
+      return dataResult.error();
     }
+
+    *data = std::move(*dataResult);
   }
   else if (icef_box) {
     // get all data and decode all
     Result<std::vector<uint8_t>*> readResult = dataExtent.read_data();
-    if (readResult.error) {
-      return readResult.error;
+    if (!readResult) {
+      return readResult.error();
     }
 
-    const std::vector<uint8_t>& compressed_bytes = *readResult.value;
+    const std::vector<uint8_t> compressed_bytes = std::move(**readResult);
 
     for (Box_icef::CompressedUnitInfo unit_info : icef_box->get_units()) {
+      if (unit_info.unit_offset + unit_info.unit_size > compressed_bytes.size()) {
+        return Error{
+          heif_error_Invalid_input,
+          heif_suberror_Unspecified,
+          "incomplete data in unci image"
+        };
+      }
+
       auto unit_start = compressed_bytes.begin() + unit_info.unit_offset;
       auto unit_end = unit_start + unit_info.unit_size;
       std::vector<uint8_t> compressed_unit_data = std::vector<uint8_t>(unit_start, unit_end);
-      std::vector<uint8_t> uncompressed_unit_data;
-      Error err = do_decompress_data(cmpC_box, std::move(compressed_unit_data), &uncompressed_unit_data);
-      if (err) {
-        return err;
+
+      auto dataResult = do_decompress_data(cmpC_box, std::move(compressed_unit_data));
+      if (!dataResult) {
+        return dataResult.error();
       }
+
+      const std::vector<uint8_t> uncompressed_unit_data = std::move(*dataResult);
       data->insert(data->end(), uncompressed_unit_data.data(), uncompressed_unit_data.data() + uncompressed_unit_data.size());
+    }
+
+    if (range_start_offset + range_size > data->size()) {
+      return {heif_error_Invalid_input,
+              heif_suberror_Unspecified,
+              "Data range out of existing range"};
     }
 
     // cut out the range that we actually need
@@ -242,16 +260,24 @@ const Error AbstractDecoder::get_compressed_image_data_uncompressed(const DataEx
   else {
     // get all data and decode all
     Result<std::vector<uint8_t>*> readResult = dataExtent.read_data();
-    if (readResult.error) {
-      return readResult.error;
+    if (!readResult) {
+      return readResult.error();
     }
 
-    std::vector<uint8_t> compressed_bytes = *readResult.value;
+    std::vector<uint8_t> compressed_bytes = std::move(**readResult);
 
     // Decode as a single blob
-    Error err = do_decompress_data(cmpC_box, compressed_bytes, data);
-    if (err) {
-      return err;
+    auto dataResult = do_decompress_data(cmpC_box, compressed_bytes);
+    if (!dataResult) {
+      return dataResult.error();
+    }
+
+    *data = std::move(*dataResult);
+
+    if (range_start_offset + range_size > data->size()) {
+      return {heif_error_Invalid_input,
+              heif_suberror_Unspecified,
+              "Data range out of existing range"};
     }
 
     // cut out the range that we actually need
@@ -263,13 +289,12 @@ const Error AbstractDecoder::get_compressed_image_data_uncompressed(const DataEx
 }
 
 
-const Error AbstractDecoder::do_decompress_data(std::shared_ptr<const Box_cmpC>& cmpC_box,
-                                                std::vector<uint8_t> compressed_data,
-                                                std::vector<uint8_t>* data) const
+Result<std::vector<uint8_t>> AbstractDecoder::do_decompress_data(std::shared_ptr<const Box_cmpC>& cmpC_box,
+                                                                 std::vector<uint8_t> compressed_data) const
 {
   if (cmpC_box->get_compression_type() == fourcc("brot")) {
 #if HAVE_BROTLI
-    return decompress_brotli(compressed_data, data);
+    return decompress_brotli(compressed_data);
 #else
     std::stringstream sstr;
   sstr << "cannot decode unci item with brotli compression - not enabled" << std::endl;
@@ -280,7 +305,7 @@ const Error AbstractDecoder::do_decompress_data(std::shared_ptr<const Box_cmpC>&
   }
   else if (cmpC_box->get_compression_type() == fourcc("zlib")) {
 #if HAVE_ZLIB
-    return decompress_zlib(compressed_data, data);
+    return decompress_zlib(compressed_data);
 #else
     std::stringstream sstr;
     sstr << "cannot decode unci item with zlib compression - not enabled" << std::endl;
@@ -291,7 +316,7 @@ const Error AbstractDecoder::do_decompress_data(std::shared_ptr<const Box_cmpC>&
   }
   else if (cmpC_box->get_compression_type() == fourcc("defl")) {
 #if HAVE_ZLIB
-    return decompress_deflate(compressed_data, data);
+    return decompress_deflate(compressed_data);
 #else
     std::stringstream sstr;
     sstr << "cannot decode unci item with deflate compression - not enabled" << std::endl;

@@ -115,6 +115,7 @@ enum heif_track_type_4cc
 {
   heif_track_type_video = heif_fourcc('v', 'i', 'd', 'e'),
   heif_track_type_image_sequence = heif_fourcc('p', 'i', 'c', 't'),
+  heif_track_type_auxiliary = heif_fourcc('a', 'u', 'x', 'v'),
   heif_track_type_metadata = heif_fourcc('m', 'e', 't', 'a')
 };
 
@@ -127,6 +128,22 @@ enum heif_track_type_4cc
  */
 LIBHEIF_API
 heif_track_type heif_track_get_track_handler_type(const heif_track*);
+
+
+enum heif_auxiliary_track_info_type
+{
+  heif_auxiliary_track_info_type_unknown = 0,
+  heif_auxiliary_track_info_type_alpha = 1
+};
+
+LIBHEIF_API
+heif_auxiliary_track_info_type heif_track_get_auxiliary_info_type(const heif_track*);
+
+LIBHEIF_API
+const char* heif_track_get_auxiliary_info_type_urn(const heif_track*);
+
+LIBHEIF_API
+int heif_track_has_alpha_channel(const heif_track*);
 
 /**
  * Get the timescale (clock ticks per second) for this track.
@@ -245,6 +262,12 @@ uint32_t heif_raw_sequence_sample_get_duration(const heif_raw_sequence_sample*);
 LIBHEIF_API
 void heif_context_set_sequence_timescale(heif_context*, uint32_t timescale);
 
+// Number of times the sequence should be played in total (default = 1).
+// Can be set to heif_sequence_maximum_number_of_repetitions.
+LIBHEIF_API
+void heif_context_set_number_of_sequence_repetitions(heif_context*, uint32_t number_of_repetitions);
+
+#define heif_sequence_maximum_number_of_repetitions 0
 
 /**
  * Specifies whether a 'sample auxiliary info' is stored with the samples.
@@ -325,6 +348,7 @@ typedef struct heif_sequence_encoding_options
 
   heif_color_conversion_options color_conversion_options;
 } heif_sequence_encoding_options;
+
 
 LIBHEIF_API
 heif_sequence_encoding_options* heif_sequence_encoding_options_alloc(void);

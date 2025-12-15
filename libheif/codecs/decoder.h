@@ -69,7 +69,7 @@ public:
   static std::shared_ptr<Decoder> alloc_for_sequence_sample_description_box(std::shared_ptr<const class Box_VisualSampleEntry> sample_description_box);
 
 
-  virtual ~Decoder() = default;
+  virtual ~Decoder();
 
   virtual heif_compression_format get_compression_format() const = 0;
 
@@ -87,6 +87,7 @@ public:
 
   // --- raw data access
 
+  // Returns a stream of packets. Each packet is starts with a 4-byte size (MSB first).
   [[nodiscard]] virtual Result<std::vector<uint8_t>> read_bitstream_configuration_data() const = 0;
 
   Result<std::vector<uint8_t>> get_compressed_data() const;
@@ -94,11 +95,14 @@ public:
   // --- decoding
 
   virtual Result<std::shared_ptr<HeifPixelImage>>
-  decode_single_frame_from_compressed_data(const struct heif_decoding_options& options,
-                                           const struct heif_security_limits* limits);
+  decode_single_frame_from_compressed_data(const heif_decoding_options& options,
+                                           const heif_security_limits* limits);
 
 private:
   DataExtent m_data_extent;
+
+  const heif_decoder_plugin* m_decoder_plugin = nullptr;
+  void* m_decoder = nullptr;
 };
 
 #endif

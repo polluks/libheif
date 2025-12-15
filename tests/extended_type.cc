@@ -25,7 +25,7 @@
 */
 
 #include "catch_amalgamated.hpp"
-#include "libheif/api_structs.h"
+#include "api_structs.h"
 #include "libheif/heif.h"
 #include "test-config.h"
 #include "test_utils.h"
@@ -39,10 +39,10 @@ TEST_CASE("make extended type") {
   heif_init(nullptr);
   heif_context *ctx = heif_context_alloc();
   heif_encoder *encoder;
-  struct heif_error err;
+  heif_error err;
   encoder = get_encoder_or_skip_test(heif_compression_HEVC);
 
-  struct heif_encoding_options *options = heif_encoding_options_alloc();
+  heif_encoding_options *options = heif_encoding_options_alloc();
 
   heif_image_handle *output_image_handle;
 
